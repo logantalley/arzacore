@@ -74,6 +74,16 @@ architecture arch of gba_sound_dma is
    signal sound_raw  : std_logic_vector(7 downto 0) := (others => '0');
    signal sound_out  : signed(15 downto 0) := (others => '0');
 
+   -- linear ramp interpolation between Direct Sound samples (see process below)
+   signal sound_out_d  : signed(15 downto 0) := (others => '0');
+   signal sound_interp : signed(15 downto 0) := (others => '0');
+
+   signal ramp_elapsed : unsigned(17 downto 0) := (others => '0');
+   signal ramp_period  : unsigned(17 downto 0) := (others => '0');
+   signal ramp_err     : unsigned(17 downto 0) := (others => '0');
+   signal ramp_adelta  : unsigned(15 downto 0) := (others => '0');
+   signal ramp_dir     : std_logic := '0';
+
    -- savestate
    signal SAVESTATE_DMASOUND       : std_logic_vector(4 downto 0);
    signal SAVESTATE_DMASOUND_back  : std_logic_vector(4 downto 0);
@@ -91,8 +101,8 @@ begin
    
    debug_fifocount <= fifo_cnt;
    
-   sound_out_left  <= sound_out when Enable_LEFT  = '1' else (others => '0');
-   sound_out_right <= sound_out when Enable_RIGHT = '1' else (others => '0');
+   sound_out_left  <= sound_interp when Enable_LEFT  = '1' else (others => '0');
+   sound_out_right <= sound_interp when Enable_RIGHT = '1' else (others => '0');
    
    new_sample_out  <= new_sample_request;
    
@@ -224,10 +234,72 @@ begin
             end if;  
             
          end if;
-      
+
       end if;
    end process;
-  
+
+   -- Real GBA hardware follows its stepped Direct Sound DAC output with an
+   -- analog low-pass filter, smoothing the samples held between DMA fetches.
+   -- This ramp reproduces that smoothing digitally (division-free Bresenham
+   -- style: spread the |delta| between two samples evenly over the previously
+   -- measured inter-sample period), so the final 48kHz decimation on the
+   -- Pocket side doesn't just re-sample a static staircase. The previous
+   -- period is used as the estimate for the current one since games don't
+   -- change the DMA sample rate sample-to-sample.
+   process (clk100)
+      variable delta : signed(15 downto 0);
+   begin
+      if rising_edge(clk100) then
+
+         sound_out_d  <= sound_out;
+         ramp_elapsed <= ramp_elapsed + 1;
+
+         if (reset = '1') then
+
+            sound_out_d  <= (others => '0');
+            sound_interp <= (others => '0');
+            ramp_elapsed <= (others => '0');
+            ramp_period  <= (others => '0');
+            ramp_err     <= (others => '0');
+            ramp_adelta  <= (others => '0');
+            ramp_dir     <= '0';
+
+         elsif (sound_out /= sound_out_d) then
+
+            -- new sample arrived: restart the ramp from the just-held value
+            -- towards the new one, spread across the last measured period
+            sound_interp <= sound_out_d;
+            ramp_period  <= ramp_elapsed;
+            ramp_elapsed <= (others => '0');
+            ramp_err     <= (others => '0');
+
+            delta := sound_out - sound_out_d;
+            if (delta(15) = '1') then
+               ramp_adelta <= unsigned(-delta);
+               ramp_dir    <= '0';
+            else
+               ramp_adelta <= unsigned(delta);
+               ramp_dir    <= '1';
+            end if;
+
+         elsif (ramp_period /= 0 and ramp_adelta /= 0) then
+
+            if (ramp_err + ramp_adelta >= ramp_period) then
+               ramp_err <= ramp_err + ramp_adelta - ramp_period;
+               if (ramp_dir = '1') then
+                  sound_interp <= sound_interp + 1;
+               else
+                  sound_interp <= sound_interp - 1;
+               end if;
+            else
+               ramp_err <= ramp_err + ramp_adelta;
+            end if;
+
+         end if;
+
+      end if;
+   end process;
+
 
 end architecture;
 
