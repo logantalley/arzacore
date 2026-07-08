@@ -246,8 +246,19 @@ begin
    -- Pocket side doesn't just re-sample a static staircase. The previous
    -- period is used as the estimate for the current one since games don't
    -- change the DMA sample rate sample-to-sample.
+   --
+   -- |delta| can exceed the period in clk100 cycles (e.g. a full-swing
+   -- sample at the fastest Direct Sound rates needs >1 unit/cycle to keep
+   -- up), so a single Bresenham step per cycle isn't enough - it falls
+   -- behind and the next tick then snaps sound_interp the rest of the way,
+   -- producing worse jumps than the plain zero-order hold. RAMP_STEPS_PER_CYCLE
+   -- unrolls the same division-free step multiple times per cycle so it can
+   -- catch up; 8 covers the realistic worst case (~2.7 units/cycle) with margin.
    process (clk100)
-      variable delta : signed(15 downto 0);
+      variable delta   : signed(15 downto 0);
+      variable v_err    : unsigned(17 downto 0);
+      variable v_interp : signed(15 downto 0);
+      constant RAMP_STEPS_PER_CYCLE : integer := 8;
    begin
       if rising_edge(clk100) then
 
@@ -284,16 +295,22 @@ begin
 
          elsif (ramp_period /= 0 and ramp_adelta /= 0) then
 
-            if (ramp_err + ramp_adelta >= ramp_period) then
-               ramp_err <= ramp_err + ramp_adelta - ramp_period;
-               if (ramp_dir = '1') then
-                  sound_interp <= sound_interp + 1;
-               else
-                  sound_interp <= sound_interp - 1;
+            v_err    := ramp_err;
+            v_interp := sound_interp;
+
+            for i in 0 to RAMP_STEPS_PER_CYCLE - 1 loop
+               if (v_err + ramp_adelta >= ramp_period) then
+                  v_err := v_err + ramp_adelta - ramp_period;
+                  if (ramp_dir = '1') then
+                     v_interp := v_interp + 1;
+                  else
+                     v_interp := v_interp - 1;
+                  end if;
                end if;
-            else
-               ramp_err <= ramp_err + ramp_adelta;
-            end if;
+            end loop;
+
+            ramp_err     <= v_err;
+            sound_interp <= v_interp;
 
          end if;
 
